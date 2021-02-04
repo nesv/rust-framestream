@@ -1,7 +1,8 @@
 mod constants;
+mod decoder;
 mod encoder;
 
-pub use crate::encoder::EncoderWriter;
+pub use crate::{decoder::Decoder, encoder::EncoderWriter};
 
 #[cfg(test)]
 mod tests;
