@@ -123,6 +123,25 @@ impl<R: Read> Decoder<R> {
             ))
         }
     }
+
+    fn read_frame_length(&mut self) -> Result<usize> {
+        let n = self.reader.read_u32::<BigEndian>()?;
+        Ok(n as usize)
+    }
+
+    fn read_n(&mut self, n: usize, buf: &mut [u8]) -> Result<usize> {
+        if n > buf.len() {
+            Err(Error::new(
+                ErrorKind::Other,
+                "data frame too large for buffer",
+            ))
+        } else {
+            match self.reader.read_exact(&mut buf[..n]) {
+                Ok(_) => Ok(n),
+                Err(e) => Err(e),
+            }
+        }
+    }
 }
 
 struct ControlFrame {
@@ -141,8 +160,7 @@ impl<R: Read> Read for Decoder<R> {
         }
 
         // Read the frame length.
-        let frame_len = self.reader.read_u32::<BigEndian>()? as usize;
-        dbg!(frame_len);
+        let frame_len = self.read_frame_length()?;
         if frame_len == 0 {
             // This is a control frame.
             let frame = self.read_control_frame()?;
@@ -151,29 +169,60 @@ impl<R: Read> Read for Decoder<R> {
                 //     // TODO: Write a CONTROL_FINISH frame.
                 // }
             }
-            Ok(0)
-        } else if frame_len > buf.len() {
-            // Discard the message, and return an error indicating the
-            // incoming frame was too large for the buffer.
-            Err(Error::new(
-                ErrorKind::Other,
-                "data frame too large for buffer",
-            ))
-        } else {
-            self.reader.read_exact(&mut buf[..frame_len])?;
-            Ok(frame_len)
+            return Ok(0);
+        }
+
+        // Read the data into the buffer.
+        self.read_n(frame_len, &mut buf[..])
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Frame {
+    data: Vec<u8>,
+}
+
+impl<R: Read> Iterator for Decoder<R> {
+    type Item = Frame;
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.started {
+            self.read_start_frame().ok()?;
+            self.started = true;
+        }
+
+        let frame_len = self.read_frame_length().ok()?;
+        if frame_len == 0 {
+            // Control frame.
+            let frame = self.read_control_frame().ok()?;
+            if frame.control_type == CONTROL_STOP {
+                // TODO(nesv): Write a CONTROL_FINISH frame.
+                return None;
+            }
+        }
+
+        let mut buf = Vec::with_capacity(frame_len);
+        buf.resize(frame_len, 0);
+        match self.read_n(frame_len, &mut buf[..]) {
+            Ok(_) => Some(Frame { data: buf }),
+            Err(_) => None,
         }
     }
 }
 
-impl<R: Read> Iterator for Decoder<R> {
-    type Item = usize;
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
+#[cfg(test)]
+#[test]
+fn iter() {
+    let input = std::io::Cursor::new([
+        0, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 17, 116, 101, 115, 116, 45, 99,
+        111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 0, 0, 0, 12, 116, 101, 115, 116, 45,
+        99, 111, 110, 116, 101, 110, 116, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 3,
+    ]);
+    let mut decoder = Decoder::new(input);
+    let want = "test-content".as_bytes().to_vec();
+    assert_eq!(decoder.next(), Some(Frame { data: want }));
+    assert_eq!(decoder.next(), None);
 }
 
-#[cfg(test)]
 #[test]
 fn read() {
     let input = std::io::Cursor::new([
